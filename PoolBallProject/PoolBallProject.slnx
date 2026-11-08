@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PoolBallProject.vcxproj" Id="6b227b6e-babb-4c9a-ab6a-db9399b71f67" />
+</Solution>
