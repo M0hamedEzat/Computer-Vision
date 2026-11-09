@@ -31,6 +31,28 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
     return warpedImage;
 }
 
+cv::Mat isolateBalls(const cv::Mat& flatImage) {
+    // 1. Convert the image from BGR (OpenCV's default) to HSV
+    cv::Mat hsvImage;
+    cv::cvtColor(flatImage, hsvImage, cv::COLOR_BGR2HSV);
+
+    // 2. Define the HSV range for the green table cloth
+    // These values might need slight tweaking, but this is a standard green range
+    cv::Scalar lowerGreen(35, 50, 50);
+    cv::Scalar upperGreen(85, 255, 255);
+
+    // 3. Create a mask: Pixels in the green range become white (255), everything else black (0)
+    cv::Mat greenMask;
+    cv::inRange(hsvImage, lowerGreen, upperGreen, greenMask);
+
+    // 4. We actually want the BALLS (not the table), so we invert the mask
+    cv::Mat ballMask;
+    cv::bitwise_not(greenMask, ballMask);
+
+    return ballMask;
+}
+
+
 // Required entry point function
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
@@ -50,7 +72,12 @@ void MyApplication() {
     cv::Mat flatTable = warpTable(img);
 
     // <-- FIXED: Display the new 'flatTable' image instead of the original 'img'
-    cv::imshow("Flat Top-Down Table", flatTable);
+    // cv::imshow("Flat Top-Down Table", flatTable);
+
+    // show the balls without the table
+    cv::Mat ballsOnly = isolateBalls(flatTable);
+    cv::imshow("Isolated Balls (Mask)", ballsOnly);
+
 
     std::cout << "Press any key in the image window to exit..." << std::endl;
     cv::waitKey(0);
