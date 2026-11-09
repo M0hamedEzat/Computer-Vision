@@ -119,7 +119,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>"M:\AUC\Fall_26_TCD\CSU44053_Computer_Vision\opencv\build\x64\vc16\lib\opencv_world4140d.lib";%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>"M:\AUC\Fall_26_TCD\CSU44053_Computer_Vision\opencv\build\x64\vc16\lib\opencv_world500d.lib";%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
