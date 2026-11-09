@@ -4,6 +4,46 @@
 #include <iostream>
 #include <vector>
 
+
+cv::Mat detectBalls(const cv::Mat& flatTable) {
+    cv::Mat gray, blurred;
+
+    // 1. Convert to grayscale (HoughCircles requires a single-channel image)
+    cv::cvtColor(flatTable, gray, cv::COLOR_BGR2GRAY);
+
+    // 2. Add a slight blur to reduce background noise from the felt texture
+    cv::medianBlur(gray, blurred, 5);
+
+    // 3. Detect the circles
+    std::vector<cv::Vec3f> circles;
+    cv::HoughCircles(blurred, circles, cv::HOUGH_GRADIENT,
+            1,      // dp
+            38,     // minDist: CRITICAL FIX. Strictly prevents overlapping circles on the same ball.
+            100,    // param1: Restored to standard edge sensitivity.
+            13,     // param2: Low enough to catch the stretched cue ball, but clean.
+            18,     // minRadius
+            28);    // maxRadius (tightened back down)
+
+
+    // 4. Draw the detected circles on a copy of the table for visualization
+    cv::Mat display = flatTable.clone();
+    for (size_t i = 0; i < circles.size(); i++) {
+        // Extract center coordinates and radius
+        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
+        int radius = cvRound(circles[i][2]);
+
+        // Draw a green dot in the center
+        cv::circle(display, center, 3, cv::Scalar(0, 255, 0), -1, 8, 0);
+        // Draw a red outline around the ball
+        cv::circle(display, center, radius, cv::Scalar(0, 0, 255), 3, 8, 0);
+    }
+
+    std::cout << "Found " << circles.size() << " balls!" << std::endl;
+    return display;
+}
+
+
+
 cv::Mat warpTable(const cv::Mat& inputImage) {
     // 1. Define the 4 corners in the original image (Column, Row)
     std::vector<cv::Point2f> srcPoints = {
@@ -31,33 +71,12 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
     return warpedImage;
 }
 
-cv::Mat isolateBalls(const cv::Mat& flatImage) {
-    // 1. Convert the image from BGR (OpenCV's default) to HSV
-    cv::Mat hsvImage;
-    cv::cvtColor(flatImage, hsvImage, cv::COLOR_BGR2HSV);
-
-    // 2. Define the HSV range for the green table cloth
-    // These values might need slight tweaking, but this is a standard green range
-    cv::Scalar lowerGreen(35, 50, 50);
-    cv::Scalar upperGreen(85, 255, 255);
-
-    // 3. Create a mask: Pixels in the green range become white (255), everything else black (0)
-    cv::Mat greenMask;
-    cv::inRange(hsvImage, lowerGreen, upperGreen, greenMask);
-
-    // 4. We actually want the BALLS (not the table), so we invert the mask
-    cv::Mat ballMask;
-    cv::bitwise_not(greenMask, ballMask);
-
-    return ballMask;
-}
-
 
 // Required entry point function
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
 
-    std::string filename = "Table1.jpeg";
+    std::string filename = "Table3.jpeg";
     cv::Mat img = cv::imread(filename);
 
     if (img.empty()) {
@@ -68,16 +87,13 @@ void MyApplication() {
 
     std::cout << "Successfully loaded " << filename << std::endl;
 
-    // <-- FIXED: Save the returned image into a new variable
+    // Save the returned image into a new variable and show it
     cv::Mat flatTable = warpTable(img);
-
-    // <-- FIXED: Display the new 'flatTable' image instead of the original 'img'
     // cv::imshow("Flat Top-Down Table", flatTable);
 
-    // show the balls without the table
-    cv::Mat ballsOnly = isolateBalls(flatTable);
-    cv::imshow("Isolated Balls (Mask)", ballsOnly);
-
+    // Find balls using shapes
+    cv::Mat foundBalls = detectBalls(flatTable);
+    cv::imshow("Detected Balls", foundBalls);
 
     std::cout << "Press any key in the image window to exit..." << std::endl;
     cv::waitKey(0);
