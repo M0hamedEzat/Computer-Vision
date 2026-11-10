@@ -6,41 +6,78 @@
 
 
 cv::Mat detectBalls(const cv::Mat& flatTable) {
-    cv::Mat gray, blurred;
-
-    // 1. Convert to grayscale (HoughCircles requires a single-channel image)
+    cv::Mat gray, blurred, edges;
     cv::cvtColor(flatTable, gray, cv::COLOR_BGR2GRAY);
-
-    // 2. Add a slight blur to reduce background noise from the felt texture
     cv::medianBlur(gray, blurred, 5);
 
-    // 3. Detect the circles
-    std::vector<cv::Vec3f> circles;
-    cv::HoughCircles(blurred, circles, cv::HOUGH_GRADIENT,
-            1,      // dp
-            38,     // minDist: CRITICAL FIX. Strictly prevents overlapping circles on the same ball.
-            100,    // param1: Restored to standard edge sensitivity.
-            13,     // param2: Low enough to catch the stretched cue ball, but clean.
-            18,     // minRadius
-            28);    // maxRadius (tightened back down)
+    // 1. CANNY EDGE MASK
+    cv::Canny(blurred, edges, 50, 150);
 
+    // 2. THICKEN THE MASK (Your suggestion to increase the circles)
+    // We use a 5x5 brush to dilate the 1-pixel Canny lines into thick, forgiving bands.
+    // This allows our perfect circle template to overlap heavily with oval-shaped balls.
+    cv::Mat dilateKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(6, 6));
+    cv::dilate(edges, edges, dilateKernel);
 
-    // 4. Draw the detected circles on a copy of the table for visualization
-    cv::Mat display = flatTable.clone();
-    for (size_t i = 0; i < circles.size(); i++) {
-        // Extract center coordinates and radius
-        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
-        int radius = cvRound(circles[i][2]);
+    // 3. THINNER FEATURE TEMPLATE
+    // Thinned the line thickness down to 1 pixel as you suggested.
+    cv::Mat templateMask = cv::Mat::zeros(50, 50, CV_8UC1);
+    cv::circle(templateMask, cv::Point(25, 25), 21, cv::Scalar(255), 5, cv::LINE_AA);
 
-        // Draw a green dot in the center
-        cv::circle(display, center, 3, cv::Scalar(0, 255, 0), -1, 8, 0);
-        // Draw a red outline around the ball
-        cv::circle(display, center, radius, cv::Scalar(0, 0, 255), 3, 8, 0);
+    // 4. FEATURE RECOGNITION
+    cv::Mat matchResult;
+    cv::matchTemplate(edges, templateMask, matchResult, cv::TM_CCOEFF_NORMED);
+
+    // 5. LESS STRICT DETECTION
+    std::vector<cv::Point> detections;
+    // Lowered from 0.35 to 0.22. Now, even a broken, partial curve gets flagged as a ball.
+    float matchThreshold = 0.35f;
+
+    for (int y = 0; y < matchResult.rows; y++) {
+        for (int x = 0; x < matchResult.cols; x++) {
+            if (matchResult.at<float>(y, x) > matchThreshold) {
+                detections.push_back(cv::Point(x + 25, y + 25));
+            }
+        }
     }
 
-    std::cout << "Found " << circles.size() << " balls!" << std::endl;
+    // 6. NON-MAXIMUM SUPPRESSION
+    // Prevent multiple detections on the exact same ball
+    std::vector<cv::Point> finalBalls;
+    for (const auto& pt : detections) {
+        bool isDuplicate = false;
+        for (const auto& finalPt : finalBalls) {
+            if (cv::norm(pt - finalPt) < 25.0) {
+                isDuplicate = true;
+                break;
+            }
+        }
+        if (!isDuplicate) {
+            finalBalls.push_back(pt);
+        }
+    }
+
+    cv::Mat display = flatTable.clone();
+    int validCount = 0;
+
+
+    for (const auto& center : finalBalls) {
+        bool isPocket = false;
+        if (isPocket) continue;
+
+        // Draw valid balls
+        cv::circle(display, center, 3, cv::Scalar(0, 255, 0), -1, 8, 0);
+        cv::circle(display, center, 21, cv::Scalar(0, 0, 255), 3, 8, 0);
+        validCount++;
+    }
+
+    cv::imshow("Debug: Thickened Canny Mask", edges);
+    cv::imshow("Debug: Thinner Feature Template", templateMask);
+    std::cout << "Found " << validCount << " valid balls via Template Matching!" << std::endl;
+
     return display;
 }
+
 
 
 
@@ -76,7 +113,7 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
 
-    std::string filename = "Table3.jpeg";
+    std::string filename = "Table2.jpeg";
     cv::Mat img = cv::imread(filename);
 
     if (img.empty()) {
