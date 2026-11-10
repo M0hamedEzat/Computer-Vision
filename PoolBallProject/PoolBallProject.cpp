@@ -10,59 +10,79 @@ cv::Mat detectBalls(const cv::Mat& flatTable) {
     cv::cvtColor(flatTable, gray, cv::COLOR_BGR2GRAY);
     cv::medianBlur(gray, blurred, 5);
 
-    // 1. CANNY EDGE MASK
-    cv::Canny(blurred, edges, 50, 150);
+    // 1. MORE SENSITIVE CANNY
+    // Dropped thresholds to 30/100. This ensures faint balls in darker 
+    // images still generate strong white outlines in the edge mask.
+    cv::Canny(blurred, edges, 30, 100);
 
-    // 2. THICKEN THE MASK (Your suggestion to increase the circles)
-    // We use a 5x5 brush to dilate the 1-pixel Canny lines into thick, forgiving bands.
-    // This allows our perfect circle template to overlap heavily with oval-shaped balls.
     cv::Mat dilateKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(6, 6));
     cv::dilate(edges, edges, dilateKernel);
 
-    // 3. THINNER FEATURE TEMPLATE
-    // Thinned the line thickness down to 1 pixel as you suggested.
-    cv::Mat templateMask = cv::Mat::zeros(50, 50, CV_8UC1);
-    cv::circle(templateMask, cv::Point(25, 25), 21, cv::Scalar(255), 5, cv::LINE_AA);
-
-    // 4. FEATURE RECOGNITION
-    cv::Mat matchResult;
-    cv::matchTemplate(edges, templateMask, matchResult, cv::TM_CCOEFF_NORMED);
-
-    // 5. LESS STRICT DETECTION
     std::vector<cv::Point> detections;
-    // Lowered from 0.35 to 0.22. Now, even a broken, partial curve gets flagged as a ball.
-    float matchThreshold = 0.35f;
+    float matchThreshold = 0.37f; // Forgiving match threshold
 
-    for (int y = 0; y < matchResult.rows; y++) {
-        for (int x = 0; x < matchResult.cols; x++) {
-            if (matchResult.at<float>(y, x) > matchThreshold) {
-                detections.push_back(cv::Point(x + 25, y + 25));
+    // 2. MULTI-SCALE TEMPLATE MATCHING
+    // We scan the image with 3 different sizes. 
+    // 17px catches shrunk balls, 21px catches normal balls, 26px catches stretched ovals.
+    std::vector<int> templateRadii = { 11 ,15, 21, 26, 30 };
+
+    for (int radius : templateRadii) {
+        int templateSize = 60; // 60x60 canvas easily fits our largest 26px radius
+        int centerPos = templateSize / 2; // Center is at (30, 30)
+
+        cv::Mat templateMask = cv::Mat::zeros(templateSize, templateSize, CV_8UC1);
+        cv::circle(templateMask, cv::Point(centerPos, centerPos), radius, cv::Scalar(255), 5, cv::LINE_AA);
+
+        cv::Mat matchResult;
+        cv::matchTemplate(edges, templateMask, matchResult, cv::TM_CCOEFF_NORMED);
+
+        for (int y = 0; y < matchResult.rows; y++) {
+            for (int x = 0; x < matchResult.cols; x++) {
+                if (matchResult.at<float>(y, x) > matchThreshold) {
+                    detections.push_back(cv::Point(x + centerPos, y + centerPos));
+                }
             }
         }
     }
 
     // 6. NON-MAXIMUM SUPPRESSION
-    // Prevent multiple detections on the exact same ball
+        // Prevent multiple detections on the exact same ball
     std::vector<cv::Point> finalBalls;
     for (const auto& pt : detections) {
         bool isDuplicate = false;
         for (const auto& finalPt : finalBalls) {
+
+            // THE FIX: Increased from 25.0 to 35.0. 
+            // Merges all template matches on the same ball, but safely leaves 
+            // tightly clustered/touching balls alone.
             if (cv::norm(pt - finalPt) < 25.0) {
                 isDuplicate = true;
                 break;
             }
         }
+
         if (!isDuplicate) {
             finalBalls.push_back(pt);
         }
     }
 
+
     cv::Mat display = flatTable.clone();
     int validCount = 0;
 
+    std::vector<cv::Point> pockets = {
+        cv::Point(0, 0), cv::Point(717, 0), cv::Point(1434, 0),
+        cv::Point(0, 683), cv::Point(717, 683), cv::Point(1434, 683)
+    };
 
     for (const auto& center : finalBalls) {
         bool isPocket = false;
+        for (const auto& pocket : pockets) {
+            if (cv::norm(center - pocket) < 65.0) {
+                isPocket = true;
+                break;
+            }
+        }
         if (isPocket) continue;
 
         // Draw valid balls
@@ -72,11 +92,11 @@ cv::Mat detectBalls(const cv::Mat& flatTable) {
     }
 
     cv::imshow("Debug: Thickened Canny Mask", edges);
-    cv::imshow("Debug: Thinner Feature Template", templateMask);
-    std::cout << "Found " << validCount << " valid balls via Template Matching!" << std::endl;
+    std::cout << "Found " << validCount << " valid balls via Multi-Scale Matching!" << std::endl;
 
     return display;
 }
+
 
 
 
@@ -113,7 +133,7 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
 
-    std::string filename = "Table2.jpeg";
+    std::string filename = "Table4.jpeg";
     cv::Mat img = cv::imread(filename);
 
     if (img.empty()) {
