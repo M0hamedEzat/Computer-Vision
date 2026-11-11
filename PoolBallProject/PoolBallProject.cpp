@@ -20,28 +20,72 @@ cv::Mat createEdgeMask(const cv::Mat& flatTable) {
     return edges;
 }
 
-std::vector<cv::Point2f> extractBlobCenters(const cv::Mat& edges) {
-    // Fill outer contours -> solid blobs
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    cv::Mat filled = cv::Mat::zeros(edges.size(), CV_8UC1);
-    cv::drawContours(filled, contours, -1, cv::Scalar(255), cv::FILLED);
+// Removes long straight strokes (cushion lines) so they can't glue onto balls.
+// L must be longer than a ball's height (~85 px) but shorter than a cushion segment.
+static cv::Mat removeCushionLines(const cv::Mat& mask, int L = 120) {
+    cv::Mat horiz, vert, lines;
+    cv::morphologyEx(mask, horiz, cv::MORPH_OPEN,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(L, 1)));
+    cv::morphologyEx(mask, vert, cv::MORPH_OPEN,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, L)));
+    cv::bitwise_or(horiz, vert, lines);
+    cv::dilate(lines, lines, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
 
-    // Open: removes cushion lines + table spots
+    cv::Mat out = mask.clone();
+    out.setTo(0, lines);
+    return out;
+}
+
+std::vector<cv::Point2f> extractBlobCenters(const cv::Mat& edges) {
+    const int W = edges.cols, H = edges.rows;
+    const int BAND = 45;   // components this close to the border get the hull treatment
+
+    // 1. cut the cushion lines out, then re-close the small gaps they leave
+    cv::Mat work = removeCushionLines(edges);
+    cv::morphologyEx(work, work, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7)));
+
+    // 2. blank the pocket mouths (fixed table geometry, stationary camera)
+    const std::vector<cv::Point> pockets = {
+        { 0, 0 },{ W / 2, 0 },{ W, 0 },{ 0, H },{ W / 2, H },{ W, H } };
+    for (size_t i = 0; i < pockets.size(); i++) {
+        bool middle = (i == 1 || i == 4);
+        cv::circle(work, pockets[i], middle ? 60 : 90, cv::Scalar(0), cv::FILLED);
+    }
+
+    // 3. solid blobs: normal fill inside the table, convex hull near the border
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(work, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::Mat filled = cv::Mat::zeros(work.size(), CV_8UC1);
+    for (const auto& c : contours) {
+        cv::Rect r = cv::boundingRect(c);
+        bool nearBorder = r.x < BAND || r.y < BAND ||
+            r.br().x > W - BAND || r.br().y > H - BAND;
+        if (nearBorder) {
+            std::vector<cv::Point> hull;
+            cv::convexHull(c, hull);
+            if (cv::contourArea(hull) < 300) continue;      // specks
+            cv::fillConvexPoly(filled, hull, cv::Scalar(255));
+        }
+        else {
+            cv::drawContours(filled, std::vector<std::vector<cv::Point>>{c}, -1,
+                cv::Scalar(255), cv::FILLED);
+        }
+    }
+
+    // 4. open: removes leftover thin stuff + table spots
     cv::morphologyEx(filled, filled, cv::MORPH_OPEN,
         cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(25, 25)));
-
-    // Optional debug view
     cv::imshow("Debug: Cleaned Filled Blobs", filled);
 
+    // 5. centres + k-means split (unchanged from your version)
     const double ballArea = 3200.0;
     std::vector<cv::Point2f> centres;
 
     cv::findContours(filled, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     for (const auto& c : contours) {
         double area = cv::contourArea(c);
-        if (area < 0.3 * ballArea) continue;               // Ignore fragments
-
+        if (area < 0.3 * ballArea) continue;
         int n = std::max(1, (int)std::lround(area / ballArea));
 
         if (n == 1) {
@@ -49,7 +93,6 @@ std::vector<cv::Point2f> extractBlobCenters(const cv::Mat& edges) {
             centres.emplace_back((float)(m.m10 / m.m00), (float)(m.m01 / m.m00));
         }
         else {
-            // Split touching blobs via K-Means
             cv::Mat blob = cv::Mat::zeros(filled.size(), CV_8UC1);
             cv::drawContours(blob, std::vector<std::vector<cv::Point>>{c}, -1,
                 cv::Scalar(255), cv::FILLED);
@@ -168,7 +211,7 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
 
-    std::string filename = "Table6.jpeg";
+    std::string filename = "Table1.jpeg";
     cv::Mat img = cv::imread(filename);
 
     if (img.empty()) {
