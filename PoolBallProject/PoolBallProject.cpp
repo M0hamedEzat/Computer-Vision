@@ -32,7 +32,15 @@ std::map<std::string, std::vector<cv::Point2f>> allGroundTruths = {
         { 23.0, 535.0 },{ 1364.0, 477.0 },{ 1204.0, 444.0 },{ 1406.0, 305.0 },{ 25.0, 131.0 },{ 1294.0, 260.0 },{ 1252.0, 226.0 },{ 72.0, 538.0 },{ 1270.0, 171.0 },{ 351.0, 249.0 },{ 901.0, 169.0 },{ 1201.0, 399.0 },{ 947.0, 629.0 }
     } }
 };
-
+// All balls ground truth map for evaluation purposes (ball number -> (X, Y) pixel coordinates)
+std::map<int, cv::Point2f> allBallsGroundTruth = {
+    { 1,{ 908.0, 253.0 } },{ 2,{ 959.0, 250.0 } },{ 3,{ 1013.0, 255.0 } },
+    { 4,{ 1072.0, 256.0 } },{ 5,{ 1132.0, 254.0 } },{ 6,{ 1184.0, 262.0 } },
+    { 7,{ 1244.0, 256.0 } },{ 8,{ 1307.0, 253.0 } },{ 9,{ 901.0, 329.0 } },
+    { 10,{ 961.0, 330.0 } },{ 11,{ 1013.0, 335.0 } },{ 12,{ 1067.0, 336.0 } },
+    { 13,{ 1130.0, 334.0 } },{ 14,{ 1187.0, 345.0 } },{ 15,{ 1245.0, 342.0 } },
+    { 0,{ 797.0, 293.0 } } // White Ball
+};
 
 
 static cv::Mat tableHomography() {
@@ -45,6 +53,85 @@ cv::Mat warpTable(const cv::Mat& inputImage) {
     cv::Mat warped;
     cv::warpPerspective(inputImage, warped, tableHomography(), cv::Size(1434, 683));
     return warped;
+}
+
+
+// Calculates a 2D HSV Histogram for a specific ball crop
+cv::Mat extractBallHistogram(const cv::Mat& flatTable, cv::Point2f center) {
+    int radius = 20; // 40x40 bounding box
+    cv::Rect roi(center.x - radius, center.y - radius, radius * 2, radius * 2);
+
+    // Safety check to ensure we don't crop outside the image
+    roi &= cv::Rect(0, 0, flatTable.cols, flatTable.rows);
+    if (roi.width <= 0 || roi.height <= 0) return cv::Mat();
+
+    cv::Mat crop = flatTable(roi);
+    cv::Mat hsvCrop;
+    cv::cvtColor(crop, hsvCrop, cv::COLOR_BGR2HSV);
+
+    // Create a circular mask so we IGNORE the green table felt in the corners of the square box
+    cv::Mat mask = cv::Mat::zeros(crop.size(), CV_8UC1);
+    cv::circle(mask, cv::Point(radius, radius), radius - 2, cv::Scalar(255), cv::FILLED);
+
+    // Set up the 2D Histogram (Hue and Saturation)
+    int h_bins = 30, s_bins = 32;
+    int histSize[] = { h_bins, s_bins };
+    float h_ranges[] = { 0, 180 }; // OpenCV Hue goes from 0-180
+    float s_ranges[] = { 0, 256 };
+    const float* ranges[] = { h_ranges, s_ranges };
+    int channels[] = { 0, 1 }; // Use the 0th (Hue) and 1st (Saturation) channels
+
+    cv::Mat hist;
+    cv::calcHist(&hsvCrop, 1, channels, mask, hist, 2, histSize, ranges, true, false);
+    cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
+
+    return hist;
+}
+
+// Builds the dictionary of reference histograms from AllBalls.jpeg
+std::map<int, cv::Mat> buildReferenceDictionary(const cv::Mat& originalAllBallsImg) {
+    std::cout << "Building Reference Histogram Dictionary from AllBalls.jpeg..." << std::endl;
+    cv::Mat flatAllBalls = warpTable(originalAllBallsImg);
+    std::map<int, cv::Mat> referenceHistograms;
+
+    for (const auto& pair : allBallsGroundTruth) {
+        int ballID = pair.first;
+        cv::Point2f center = pair.second;
+
+        cv::Mat hist = extractBallHistogram(flatAllBalls, center);
+        referenceHistograms[ballID] = hist;
+    }
+    std::cout << "Successfully extracted " << referenceHistograms.size() << " reference histograms!" << std::endl;
+    return referenceHistograms;
+}
+
+int identifyBall(const cv::Mat& flatTable, cv::Point2f center, const std::map<int, cv::Mat>& referenceHistograms) {
+    // 1. Extract the HSV fingerprint of the unknown ball
+    cv::Mat targetHist = extractBallHistogram(flatTable, center);
+
+    // Safety check in case the ball is too close to the absolute edge to crop
+    if (targetHist.empty()) return -1;
+
+    int bestMatchID = -1;
+    double bestDistance = 1.0; // Max possible distance in Bhattacharyya is 1.0
+
+    // 2. Loop through all 16 reference fingerprints
+    for (const auto& pair : referenceHistograms) {
+        int refID = pair.first;
+        const cv::Mat& refHist = pair.second;
+
+        // 3. Mathematical Comparison (Bhattacharyya Distance)
+        // 0.0 means perfect identical match. 1.0 means complete mismatch.
+        double distance = cv::compareHist(targetHist, refHist, cv::HISTCMP_BHATTACHARYYA);
+
+        // Keep track of the lowest distance (highest similarity)
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestMatchID = refID;
+        }
+    }
+
+    return bestMatchID;
 }
 
 
@@ -267,10 +354,9 @@ std::vector<cv::Point2f> extractBlobCenters(const cv::Mat& edges, const cv::Mat&
     return unique;
 }
 
-cv::Mat renderResults(const cv::Mat& flatTable, const std::vector<cv::Point2f>& centres) {
+// Added the referenceHistograms map as a parameter
+cv::Mat renderResults(const cv::Mat& flatTable, const std::vector<cv::Point2f>& centres, const std::map<int, cv::Mat>& referenceHistograms) {
     cv::Mat display = flatTable.clone();
-    cv::Mat hsvTable;
-    cv::cvtColor(flatTable, hsvTable, cv::COLOR_BGR2HSV);
 
     // 6 Pockets on a 1434x683 warped table
     std::vector<cv::Point> pockets = {
@@ -290,44 +376,41 @@ cv::Mat renderResults(const cv::Mat& flatTable, const std::vector<cv::Point2f>& 
         }
         if (isPocket) continue;
 
-        // Dynamic Color Sampling
-        cv::Rect roi((int)center.x - 2, (int)center.y - 2, 5, 5);
-        cv::Scalar ringColor(0, 0, 255); // Red fallback
+        // === STAGE 2: IDENTIFY THE BALL ===
+        int ballID = identifyBall(flatTable, center, referenceHistograms);
 
-        if (roi.x >= 0 && roi.y >= 0 && roi.x + roi.width < flatTable.cols && roi.y + roi.height < flatTable.rows) {
-            cv::Mat colorPatch = hsvTable(roi);
-            int val = (int)cv::mean(colorPatch)[2];
-
-            if (val < 50) {
-                ringColor = cv::Scalar(0, 0, 0); // Black for 8-ball
-            }
-            else {
-                ringColor = cv::mean(flatTable(roi)); // Ball's BGR color
-            }
-        }
-
-        // Draw center dot and colored ring
+        // Draw center dot and a clean white ring
         cv::circle(display, center, 3, cv::Scalar(0, 255, 0), -1, 8, 0);
-        cv::circle(display, center, 21, ringColor, 2, cv::LINE_AA);
+        cv::circle(display, center, 21, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+        // Draw the text label
+        std::string label = (ballID == 0) ? "W" : std::to_string(ballID);
+        if (ballID == -1) label = "?"; // Failsafe
+
+        // Draw a black outline for the text so it's readable over any color
+        cv::putText(display, label, cv::Point(center.x - 10, center.y - 25),
+            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+        cv::putText(display, label, cv::Point(center.x - 10, center.y - 25),
+            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
         validCount++;
     }
 
-    std::cout << "Successfully rendered " << validCount << " valid balls!" << std::endl;
     return display;
 }
 
-std::vector<cv::Point2f> detectBalls(const cv::Mat& flatTable, const cv::Mat& original) {    // Step 1: Preprocess and extract edges
-    cv::Mat edges = createEdgeMask(flatTable);
-    cv::imshow("Debug: Canny Edges", edges);
 
-    // Step 2: Clean blobs and extract centers (handling clusters via K-Means)
+std::vector<cv::Point2f> detectBalls(const cv::Mat& flatTable, const cv::Mat& original, const std::map<int, cv::Mat>& refDict) {
+    cv::Mat edges = createEdgeMask(flatTable);
     std::vector<cv::Point2f> centres = extractBlobCenters(edges, original, tableHomography());
 
-    // Step 3: Filter out pockets, sample colors, and draw final visual results
-    cv::Mat finalOutput = renderResults(flatTable, centres);
-    cv::imshow("Detected Balls", finalOutput);
+    // Pass the dictionary here!
+    cv::Mat finalOutput = renderResults(flatTable, centres, refDict);
+    cv::imshow("Detected & Identified Balls", finalOutput);
+
     return centres;
 }
+
 
 struct EvaluationMetrics {
     int TP = 0, FP = 0, FN = 0;
@@ -404,6 +487,13 @@ void MyApplication() {
     int totalGroundTruthCount = 0;
     int totalDetectedCount = 0;
 
+    cv::Mat allBallsImg = cv::imread("AllBalls.jpeg");
+    if (allBallsImg.empty()) {
+        std::cerr << "Error: Cannot load training image AllBalls.jpeg!" << std::endl;
+        return;
+    }
+    std::map<int, cv::Mat> referenceDict = buildReferenceDictionary(allBallsImg);
+
     for (const std::string& filename : tableFilenames) {
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "Processing " << filename << "..." << std::endl;
@@ -418,11 +508,11 @@ void MyApplication() {
         cv::Mat flatTable = warpTable(img);
 
         // 2. Run detection pipeline (this shows the windows and returns the coordinate vector)
-        std::vector<cv::Point2f> detectedCenters = detectBalls(flatTable, img);
+        std::vector<cv::Point2f> detectedCenters = detectBalls(flatTable, img, referenceDict);
         totalDetectedCount += detectedCenters.size();
 
         // 3. Save the resulting image automatically to disk
-        cv::Mat resultOutput = renderResults(flatTable, detectedCenters);
+        cv::Mat resultOutput = renderResults(flatTable, detectedCenters, referenceDict);
         std::string outputImageName = "Result_" + filename;
         cv::imwrite(outputImageName, resultOutput);
         std::cout << "Saved visual output as: " << outputImageName << std::endl;
