@@ -4,6 +4,36 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <map>
+#include <string>
+
+// --- AUTO-GENERATED GROUND TRUTH DATA ---
+// Map of Image Filename -> Vector of exact (X, Y) pixel coordinates of the balls
+std::map<std::string, std::vector<cv::Point2f>> allGroundTruths = {
+    { "AllBalls.jpeg",{
+        { 908.0, 253.0 },{ 959.0, 250.0 },{ 1013.0, 255.0 },{ 1072.0, 256.0 },{ 1132.0, 254.0 },{ 1184.0, 262.0 },{ 1244.0, 256.0 },{ 1307.0, 253.0 },{ 901.0, 329.0 },{ 961.0, 330.0 },{ 1013.0, 335.0 },{ 1067.0, 336.0 },{ 1130.0, 334.0 },{ 1187.0, 345.0 },{ 1245.0, 342.0 },{ 797.0, 293.0 }
+    } },
+    { "Table1.jpeg",{
+        { 1092.0, 309.0 },{ 1212.0, 429.0 },{ 1131.0, 383.0 },{ 1050.0, 335.0 },{ 1211.0, 285.0 },{ 1170.0, 261.0 },{ 1173.0, 352.0 },{ 1132.0, 331.0 },{ 1210.0, 240.0 },{ 1170.0, 310.0 },{ 1169.0, 407.0 },{ 1135.0, 281.0 },{ 1212.0, 374.0 },{ 1091.0, 360.0 },{ 1213.0, 331.0 },{ 29.0, 288.0 }
+    } },
+    { "Table2.jpeg",{
+        { 1103.0, 282.0 },{ 1224.0, 620.0 },{ 1121.0, 391.0 },{ 1046.0, 315.0 },{ 1305.0, 310.0 },{ 621.0, 202.0 },{ 1173.0, 361.0 },{ 1132.0, 331.0 },{ 725.0, 177.0 },{ 1269.0, 185.0 },{ 798.0, 665.0 },{ 438.0, 296.0 },{ 1235.0, 53.0 },{ 1090.0, 362.0 },{ 1205.0, 399.0 },{ 1169.0, 507.0 }
+    } },
+    { "Table3.jpeg",{
+        { 908.0, 23.0 },{ 1224.0, 616.0 },{ 1199.0, 447.0 },{ 29.0, 336.0 },{ 1406.0, 305.0 },{ 621.0, 210.0 },{ 1294.0, 260.0 },{ 1252.0, 226.0 },{ 725.0, 177.0 },{ 1270.0, 171.0 },{ 798.0, 665.0 },{ 351.0, 249.0 },{ 1233.0, 53.0 },{ 901.0, 169.0 },{ 1201.0, 399.0 },{ 29.0, 434.0 }
+    } },
+    { "Table4.jpeg",{
+        { 908.0, 23.0 },{ 1407.0, 546.0 },{ 1204.0, 444.0 },{ 1406.0, 305.0 },{ 621.0, 210.0 },{ 1294.0, 260.0 },{ 1252.0, 226.0 },{ 724.0, 181.0 },{ 1270.0, 171.0 },{ 798.0, 665.0 },{ 351.0, 249.0 },{ 1231.0, 58.0 },{ 901.0, 169.0 },{ 1201.0, 399.0 },{ 1392.0, 88.0 }
+    } },
+    { "Table5.jpeg",{
+        { 23.0, 535.0 },{ 1407.0, 546.0 },{ 1204.0, 444.0 },{ 1406.0, 305.0 },{ 25.0, 131.0 },{ 1294.0, 260.0 },{ 1252.0, 226.0 },{ 72.0, 538.0 },{ 1270.0, 171.0 },{ 798.0, 665.0 },{ 351.0, 249.0 },{ 901.0, 169.0 },{ 1201.0, 399.0 },{ 26.0, 608.0 }
+    } },
+    { "Table6.jpeg",{
+        { 23.0, 535.0 },{ 1364.0, 477.0 },{ 1204.0, 444.0 },{ 1406.0, 305.0 },{ 25.0, 131.0 },{ 1294.0, 260.0 },{ 1252.0, 226.0 },{ 72.0, 538.0 },{ 1270.0, 171.0 },{ 351.0, 249.0 },{ 901.0, 169.0 },{ 1201.0, 399.0 },{ 947.0, 629.0 }
+    } }
+};
+
+
 
 static cv::Mat tableHomography() {
     std::vector<cv::Point2f> src = { { 337.f, 35.f },{ 1888.f, 451.f },{ 1570.f, 21.f },{ 38.f, 472.f } };
@@ -286,8 +316,7 @@ cv::Mat renderResults(const cv::Mat& flatTable, const std::vector<cv::Point2f>& 
     return display;
 }
 
-cv::Mat detectBalls(const cv::Mat& flatTable, const cv::Mat& original) {
-    // Step 1: Preprocess and extract edges
+std::vector<cv::Point2f> detectBalls(const cv::Mat& flatTable, const cv::Mat& original) {    // Step 1: Preprocess and extract edges
     cv::Mat edges = createEdgeMask(flatTable);
     cv::imshow("Debug: Canny Edges", edges);
 
@@ -296,8 +325,65 @@ cv::Mat detectBalls(const cv::Mat& flatTable, const cv::Mat& original) {
 
     // Step 3: Filter out pockets, sample colors, and draw final visual results
     cv::Mat finalOutput = renderResults(flatTable, centres);
+    cv::imshow("Detected Balls", finalOutput);
+    return centres;
+}
 
-    return finalOutput;
+struct EvaluationMetrics {
+    int TP = 0, FP = 0, FN = 0;
+    double precision = 0.0;
+    double recall = 0.0;
+    double f1_score = 0.0;
+};
+
+EvaluationMetrics evaluateDetections(const std::vector<cv::Point2f>& detected,
+    const std::vector<cv::Point2f>& groundTruth,
+    float threshold = 25.0f) { // 25px radius of leniency
+    EvaluationMetrics metrics;
+    std::vector<bool> gtMatched(groundTruth.size(), false);
+
+    for (const auto& detPoint : detected) {
+        float minDist = threshold;
+        int matchIdx = -1;
+
+        // Find the closest unmatched ground truth ball
+        for (size_t j = 0; j < groundTruth.size(); ++j) {
+            if (gtMatched[j]) continue;
+
+            float dist = cv::norm(detPoint - groundTruth[j]);
+            if (dist < minDist) {
+                minDist = dist;
+                matchIdx = (int)j;
+            }
+        }
+
+        if (matchIdx != -1) {
+            // It successfully aligned with a real ball
+            metrics.TP++;
+            gtMatched[matchIdx] = true;
+        }
+        else {
+            // A detection that matches nothing is a hallucination (False Positive)
+            metrics.FP++;
+        }
+    }
+
+    // Any ground truth ball that wasn't found is a missed ball (False Negative)
+    for (bool matched : gtMatched) {
+        if (!matched) metrics.FN++;
+    }
+
+    // Calculate final metrics
+    if (metrics.TP + metrics.FP > 0)
+        metrics.precision = (double)metrics.TP / (metrics.TP + metrics.FP);
+
+    if (metrics.TP + metrics.FN > 0)
+        metrics.recall = (double)metrics.TP / (metrics.TP + metrics.FN);
+
+    if (metrics.precision + metrics.recall > 0)
+        metrics.f1_score = 2.0 * (metrics.precision * metrics.recall) / (metrics.precision + metrics.recall);
+
+    return metrics;
 }
 
 
@@ -305,29 +391,93 @@ cv::Mat detectBalls(const cv::Mat& flatTable, const cv::Mat& original) {
 void MyApplication() {
     std::cout << "=== Pool Ball System Initialized ===" << std::endl;
 
-    std::string filename = "Table4.jpeg";
-    cv::Mat img = cv::imread(filename);
+    // List of all 6 test tables to process automatically
+    std::vector<std::string> tableFilenames = {
+        "Table1.jpeg", "Table2.jpeg", "Table3.jpeg",
+        "Table4.jpeg", "Table5.jpeg", "Table6.jpeg"
+    };
 
-    if (img.empty()) {
-        std::cerr << "Error: Could not load " << filename << "!" << std::endl;
-        std::cerr << "Make sure your images are in the main project directory." << std::endl;
-        return;
+    // Accumulators for overall dataset evaluation
+    int totalTP = 0;
+    int totalFP = 0;
+    int totalFN = 0;
+    int totalGroundTruthCount = 0;
+    int totalDetectedCount = 0;
+
+    for (const std::string& filename : tableFilenames) {
+        std::cout << "\n----------------------------------------" << std::endl;
+        std::cout << "Processing " << filename << "..." << std::endl;
+
+        cv::Mat img = cv::imread(filename);
+        if (img.empty()) {
+            std::cerr << "Error: Could not load " << filename << "! Skipping." << std::endl;
+            continue;
+        }
+
+        // 1. Warp to flat top-down view
+        cv::Mat flatTable = warpTable(img);
+
+        // 2. Run detection pipeline (this shows the windows and returns the coordinate vector)
+        std::vector<cv::Point2f> detectedCenters = detectBalls(flatTable, img);
+        totalDetectedCount += detectedCenters.size();
+
+        // 3. Save the resulting image automatically to disk
+        cv::Mat resultOutput = renderResults(flatTable, detectedCenters);
+        std::string outputImageName = "Result_" + filename;
+        cv::imwrite(outputImageName, resultOutput);
+        std::cout << "Saved visual output as: " << outputImageName << std::endl;
+
+        // 4. Evaluate against ground truth map
+        if (allGroundTruths.find(filename) != allGroundTruths.end()) {
+            std::vector<cv::Point2f> groundTruth = allGroundTruths[filename];
+            totalGroundTruthCount += groundTruth.size();
+
+            // Evaluate with a 30.0f pixel tolerance
+            EvaluationMetrics results = evaluateDetections(detectedCenters, groundTruth, 30.0f);
+
+            // Accumulate totals for overall metrics
+            totalTP += results.TP;
+            totalFP += results.FP;
+            totalFN += results.FN;
+
+            // Print individual table results
+            std::cout << "--- Scorecard for " << filename << " ---" << std::endl;
+            std::cout << "  * Detected vs GT Count: " << detectedCenters.size() << " / " << groundTruth.size() << std::endl;
+            std::cout << "  * True Positives:       " << results.TP << std::endl;
+            std::cout << "  * False Positives:      " << results.FP << std::endl;
+            std::cout << "  * False Negatives:      " << results.FN << std::endl;
+            std::cout << "  * Precision:            " << results.precision * 100.0 << "%" << std::endl;
+            std::cout << "  * Recall:               " << results.recall * 100.0 << "%" << std::endl;
+            std::cout << "  * F1-Score:             " << results.f1_score * 100.0 << "%" << std::endl;
+        }
+        else {
+            std::cerr << "Warning: No ground truth data found for " << filename << std::endl;
+        }
     }
 
-    std::cout << "Successfully loaded " << filename << std::endl;
+    // 5. Calculate Overall Dataset Metrics (Micro-averaged across all 6 images)
+    double overallPrecision = (totalTP + totalFP > 0) ? (double)totalTP / (totalTP + totalFP) : 0.0;
+    double overallRecall = (totalTP + totalFN > 0) ? (double)totalTP / (totalTP + totalFN) : 0.0;
+    double overallF1 = (overallPrecision + overallRecall > 0) ?
+        2.0 * (overallPrecision * overallRecall) / (overallPrecision + overallRecall) : 0.0;
 
-    // Save the returned image into a new variable and show it
-    cv::Mat flatTable = warpTable(img);
-    // cv::imshow("Flat Top-Down Table", flatTable);
+    std::cout << "\n==============================================" << std::endl;
+    std::cout << "        OVERALL DATASET EVALUATION (1-6)      " << std::endl;
+    std::cout << "==============================================" << std::endl;
+    std::cout << "  * Total True Positives:  " << totalTP << std::endl;
+    std::cout << "  * Total False Positives: " << totalFP << std::endl;
+    std::cout << "  * Total False Negatives: " << totalFN << std::endl;
+    std::cout << "----------------------------------------------" << std::endl;
+    std::cout << "  * Overall Precision: " << overallPrecision * 100.0 << "%" << std::endl;
+    std::cout << "  * Overall Recall:    " << overallRecall * 100.0 << "%" << std::endl;
+    std::cout << "  * Overall F1-Score:  " << overallF1 * 100.0 << "%" << std::endl;
+    std::cout << "==============================================\n" << std::endl;
 
-    // Find balls using shapes
-    cv::Mat foundBalls = detectBalls(flatTable, img);
-    cv::imshow("Detected Balls", foundBalls);
-
-    std::cout << "Press any key in the image window to exit..." << std::endl;
+    std::cout << "Batch execution finished successfully! Press any key to exit..." << std::endl;
     cv::waitKey(0);
     cv::destroyAllWindows();
 }
+
 
 int main() {
     MyApplication();
