@@ -456,6 +456,188 @@ EvaluationMetrics evaluateDetections(const std::vector<RecognizedBall>& detected
 
     return metrics;
 }
+void generateReportImages(const cv::Mat& flatTable, const cv::Mat& original, const cv::Mat& H) {
+    const int W = flatTable.cols, Ht = flatTable.rows;
+    const int BAND = 45;
+    const double ballArea = 3200.0;
+
+    // (a) Step 1: Edge map
+    cv::Mat edges = createEdgeMask(flatTable);
+    cv::imwrite("fig_s1_edges.png", edges);
+
+    // (b) Step 2: Cushions and pockets removed
+    cv::Mat clean = removeCushionLines(edges);
+    cv::morphologyEx(clean, clean, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7)));
+    const std::vector<cv::Point> pockets = {
+        { 0, 0 },{ W / 2, 0 },{ W, 0 },{ 0, Ht },{ W / 2, Ht },{ W, Ht }
+    };
+    for (size_t i = 0; i < pockets.size(); i++) {
+        cv::circle(clean, pockets[i], (i == 1 || i == 4) ? 60 : 90, cv::Scalar(0), cv::FILLED);
+    }
+    cv::imwrite("fig_s1_clean.png", clean);
+
+    // (c) Step 3: Solid shapes (hull near border)
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(clean, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::Mat blobs = cv::Mat::zeros(clean.size(), CV_8UC1);
+
+    for (const auto& c : contours) {
+        cv::Rect r = cv::boundingRect(c);
+        bool nearBorder = r.x < BAND || r.y < BAND || r.br().x > W - BAND || r.br().y > Ht - BAND;
+        if (nearBorder) {
+            std::vector<cv::Point> hull;
+            cv::convexHull(c, hull);
+            if (cv::contourArea(hull) < 300) continue;
+            cv::fillConvexPoly(blobs, hull, cv::Scalar(255));
+        }
+        else {
+            cv::drawContours(blobs, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(255), cv::FILLED);
+        }
+    }
+    cv::imwrite("fig_s1_blobs.png", blobs);
+
+    // (d) Step 4: After the 25 px opening
+    cv::Mat opened;
+    cv::morphologyEx(blobs, opened, cv::MORPH_OPEN,
+        cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(25, 25)));
+    cv::imwrite("fig_s1_opened.png", opened);
+
+    // Prepare for cluster tracking
+    cv::Mat foreground;
+    cv::dilate(blobs, foreground, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15)));
+    cv::findContours(opened, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    cv::Mat clusterVis = flatTable.clone();
+    cv::Mat finalVis = flatTable.clone();
+    std::vector<cv::Point2f> finalCentres;
+
+    // (e) & (f) Steps 6 & Final: Process blobs and draw clusters/final centers
+    for (const auto& c : contours) {
+        double area = cv::contourArea(c);
+        if (area < 0.3 * ballArea) continue;
+
+        int n = std::max(1, (int)std::lround(area / ballArea));
+
+        if (n == 1) {
+            cv::Moments m = cv::moments(c);
+            finalCentres.emplace_back((float)(m.m10 / m.m00), (float)(m.m01 / m.m00));
+        }
+        else {
+            // It's a cluster. Extract and draw the Hough circles for visualization (e)
+            cv::Mat blob = cv::Mat::zeros(opened.size(), CV_8UC1);
+            cv::drawContours(blob, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(255), cv::FILLED);
+
+            std::vector<cv::Point2f> split = splitCluster(original, H, blob, foreground, ballArea);
+            if (!split.empty()) {
+                finalCentres.insert(finalCentres.end(), split.begin(), split.end());
+                for (const auto& p : split) {
+                    // Draw detected cluster circles in orange
+                    cv::circle(clusterVis, p, 21, cv::Scalar(0, 165, 255), 2, cv::LINE_AA);
+                    cv::circle(clusterVis, p, 3, cv::Scalar(0, 165, 255), -1);
+                }
+            }
+            else {
+                // Fallback to K-means logic for drawing if Hough failed
+                std::vector<cv::Point> pts;
+                cv::findNonZero(blob, pts);
+                cv::Mat data((int)pts.size(), 2, CV_32F);
+                for (int i = 0; i < (int)pts.size(); i++) {
+                    data.at<float>(i, 0) = (float)pts[i].x;
+                    data.at<float>(i, 1) = (float)pts[i].y;
+                }
+                cv::Mat labels, km;
+                cv::kmeans(data, n, labels, cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 50, 0.5), 5, cv::KMEANS_PP_CENTERS, km);
+                for (int i = 0; i < n; i++) {
+                    cv::Point2f p(km.at<float>(i, 0), km.at<float>(i, 1));
+                    finalCentres.emplace_back(p);
+                    cv::circle(clusterVis, p, 21, cv::Scalar(255, 0, 255), 2, cv::LINE_AA); // K-means in purple
+                }
+            }
+        }
+    }
+    cv::imwrite("fig_s1_cluster.png", clusterVis);
+
+    // Draw final centers for visualization (f)
+    for (const auto& p : finalCentres) {
+        cv::circle(finalVis, p, 4, cv::Scalar(0, 255, 0), -1);
+        cv::circle(finalVis, p, 21, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+    }
+    cv::imwrite("fig_s1_final.png", finalVis);
+}
+
+
+void generateStage2ReportImages(const cv::Mat& flatTrain, const cv::Point2f& trainCenter,
+    const cv::Mat& flatTest, const cv::Point2f& testCenter,
+    const cv::Mat& finalLabeledOutput) {
+    int radius = 20;
+
+    // Helper lambda to crop and mask a ball
+    auto getMaskedPatch = [radius](const cv::Mat& img, cv::Point2f pt) {
+        cv::Rect roi(pt.x - radius, pt.y - radius, radius * 2, radius * 2);
+        cv::Mat crop = img(roi).clone();
+        cv::Mat mask = cv::Mat::zeros(crop.size(), CV_8UC1);
+        cv::circle(mask, cv::Point(radius, radius), radius - 2, cv::Scalar(255), cv::FILLED);
+        cv::Mat masked = cv::Mat::zeros(crop.size(), CV_8UC1);
+        cv::bitwise_and(crop, crop, masked, mask);
+        return masked;
+        };
+
+    // (a) Patch and circular mask
+    cv::Mat trainPatch = getMaskedPatch(flatTrain, trainCenter);
+    cv::Mat testPatch = getMaskedPatch(flatTest, testCenter);
+    cv::Mat combinedPatch;
+    cv::hconcat(trainPatch, testPatch, combinedPatch);
+    // Scale up x4 so it's not tiny in the report
+    cv::resize(combinedPatch, combinedPatch, cv::Size(), 4.0, 4.0, cv::INTER_NEAREST);
+    cv::imwrite("fig_s2_patch.png", combinedPatch);
+
+    // Helper lambda to generate a visual 2D histogram
+    auto getHistVis = [radius](const cv::Mat& img, cv::Point2f pt) {
+        cv::Rect roi(pt.x - radius, pt.y - radius, radius * 2, radius * 2);
+        cv::Mat crop = img(roi);
+        cv::Mat hsv;
+        cv::cvtColor(crop, hsv, cv::COLOR_BGR2HSV);
+
+        cv::Mat mask = cv::Mat::zeros(crop.size(), CV_8UC1);
+        cv::circle(mask, cv::Point(radius, radius), radius - 2, cv::Scalar(255), cv::FILLED);
+
+        int h_bins = 30, s_bins = 32;
+        int histSize[] = { h_bins, s_bins };
+        float h_ranges[] = { 0, 180 };
+        float s_ranges[] = { 0, 256 };
+        const float* ranges[] = { h_ranges, s_ranges };
+        int channels[] = { 0, 1 };
+
+        cv::Mat hist;
+        cv::calcHist(&hsv, 1, channels, mask, hist, 2, histSize, ranges, true, false);
+
+        // Normalize to 0-255 for visual rendering
+        cv::normalize(hist, hist, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+        cv::Mat histVis;
+        // Scale the 30x32 matrix up to a viewable size (320x300)
+        cv::resize(hist, histVis, cv::Size(320, 300), 0, 0, cv::INTER_NEAREST);
+        // Apply a heatmap color scheme so the peaks are visible
+        cv::applyColorMap(histVis, histVis, cv::COLORMAP_JET);
+        return histVis;
+        };
+
+    // (b) Hue-saturation fingerprint
+    cv::Mat trainHist = getHistVis(flatTrain, trainCenter);
+    cv::Mat testHist = getHistVis(flatTest, testCenter);
+    cv::Mat combinedHist;
+    cv::hconcat(trainHist, testHist, combinedHist);
+    cv::imwrite("fig_s2_hist.png", combinedHist);
+
+    // (c) Numbers given to the balls
+    // Crop a 140x140 region around the ball from the final output showing the ID text
+    cv::Rect labelRoi(testCenter.x - 70, testCenter.y - 70, 140, 140);
+    labelRoi &= cv::Rect(0, 0, finalLabeledOutput.cols, finalLabeledOutput.rows);
+    cv::Mat labelsCrop = finalLabeledOutput(labelRoi).clone();
+    cv::resize(labelsCrop, labelsCrop, cv::Size(), 2.5, 2.5, cv::INTER_CUBIC);
+    cv::imwrite("fig_s2_labels.png", labelsCrop);
+}
+
 
 void MyApplication() {
     std::cout << "=== Pool Ball Detection & Identification System ===" << std::endl;
@@ -487,7 +669,10 @@ void MyApplication() {
         }
 
         cv::Mat flatTable = warpTable(img);
-
+        
+        if (filename == "Table4.jpeg") { // Using Table 4 since it has a good cluster
+            generateReportImages(flatTable, img, tableHomography());
+        }
         // Run detection and recognition pipeline
         std::vector<RecognizedBall> recognizedBalls = detectBalls(flatTable, img, referenceDict);
 
@@ -528,6 +713,17 @@ void MyApplication() {
         else {
             std::cerr << "Warning: No ground truth data found for " << filename << std::endl;
         }
+        if (filename == "Table1.jpeg") {
+            // 4-Ball center from AllBalls.jpeg (Train)
+            cv::Point2f train4Ball(1072.0, 256.0);
+            // 4-Ball center from Table1.jpeg (Test)
+            cv::Point2f test4Ball(1050.0, 335.0);
+
+            cv::Mat flatAllBalls = warpTable(allBallsImg);
+
+            generateStage2ReportImages(flatAllBalls, train4Ball, flatTable, test4Ball, resultOutput);
+        }
+
     }
 
     // Overall Dataset Metrics (Micro-averaged across all 6 tables)
